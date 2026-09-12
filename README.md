@@ -158,13 +158,13 @@ Validated bottom-up, one layer at a time:
 
 ![Firewall block DMZ to LAN](screenshots/04_suricata/31_pfsense_firewall_block_dmz_lan.png)
 
-The full diagnostic path to this result — including two rounds of incorrect conclusions before the real cause was found — is documented in [`lessons_learned_P2.md`](./lessons_learned_P2.md).
+The full diagnostic path to this result — including two rounds of incorrect conclusions before the real cause was found — is documented in [`lessons_learned.md`](./lessons_learned.md).
 
 ---
 
 ### 4. DNS Configuration — Full Troubleshooting Chain
 
-DNS resolution required a 5-step fix due to VirtualBox NAT constraints. Documented in detail in [`lessons_learned_P2.md`](./lessons_learned_P2.md).
+DNS resolution required a 5-step fix due to VirtualBox NAT constraints. Documented in detail in [`lessons_learned.md`](./lessons_learned.md).
 
 | Step | Action | Result |
 |---|---|---|
@@ -267,7 +267,7 @@ The WAN instance keeps the default `Home Net` deliberately: it is a perimeter se
 logisecure-pfsense-segmentation/
 ├── README.md
 ├── p2_logo.svg
-├── lessons_learned_P2.md
+├── lessons_learned.md
 ├── firewall-rules-justification.md
 └── screenshots/
     ├── 00_pfsense_base/         # Console — interfaces, hostname, audit log
