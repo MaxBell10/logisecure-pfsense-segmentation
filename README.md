@@ -31,7 +31,7 @@ INTERNET / WAN (VirtualBox NAT)
         └── [DMZ — 10.10.20.0/24]
                 Kali Linux  10.10.20.10  Test / attack host
                 Web supplier-facing (planned)
-                Cowrie honeypot → logisecure-honeypot-threat-intel (P8)
+                Cowrie honeypot → logisecure-honeypot-threat-intel
 ```
 
 | VM | OS | IP | Role |
