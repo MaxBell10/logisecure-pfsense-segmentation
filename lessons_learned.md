@@ -240,6 +240,203 @@ The two layers were also proven on different artefacts: a firewall log entry for
 
 ---
 
+### Where you scan from decides what the scan measures
+
+Kali had sat in the DMZ for the whole segmentation and detection phase, and the obvious move was to leave it there and point OpenVAS at DC01. That scan would have produced a result — hosts unreachable, zero findings — and it would have measured nothing about the hosts. `CRITICAL - Block DMZ to LAN` drops the SYNs at `em2`; the report would have restated §3 of the README with a different tool.
+
+A vulnerability assessment is not a segmentation test. It asks *what is wrong with these hosts*, not *can this attacker reach them*, and those two questions need two different vantage points. The assessment belongs in a position of trust — which is also how it is performed in practice, from inside the perimeter rather than from a demilitarised zone.
+
+**Fix applied:** Move Kali to the LAN (`10.10.10.50`) for the scanning phase, and document the repositioning in the README as a methodological decision rather than burying it.
+
+**Lesson:** Before running any scan, state what the result is supposed to prove. "Zero findings" from a blocked position and "zero findings" from a trusted position are the same sentence describing opposite situations.
+
+**Production difference:** Scanner placement is an architectural decision. A single scanner behind a segmented network reports clean subnets it simply cannot reach, and that coverage gap is indistinguishable from a healthy result. Distributed scanners — one per segment, or credentialed agents — exist to remove the ambiguity, and every scan report should record the scanner's network position alongside its findings.
+
+---
+
+### A scan that finds nothing is not a result until the scanner has been checked against a baseline
+
+The first OpenVAS scan finished cleanly: status `Done`, two hosts scanned, no errors reported, 30 minutes of runtime. DC01 — the domain controller, the most exposed asset in this lab — came back with **zero open ports, zero findings, operating system unidentified**.
+
+That is a publishable-looking result, and it was false.
+
+The contradicting evidence was already in this repository. The nmap capture from the Suricata phase (`25_kali_nmap_dc01.png`) documents the same Kali host, on the same segment, finding 13 open ports and a full AD service fingerprint. Re-running `nmap -Pn 10.10.10.10` to settle it took 8 seconds and returned the same 13 ports.
+
+**Cause.** The target used the `All IANA assigned TCP` port list — several thousand ports. Windows hosts drop unsolicited SYNs silently instead of returning RST (nmap reports `987 filtered tcp ports (no-response)` for exactly that reason), so every closed port costs the scanner a full timeout rather than an immediate answer. DC01 spent 25 minutes exhausting timeouts and never reached the ports that were open. Nothing in the interface signals this: the task reports `Done`, and `Error Messages` reports `0 of 0`.
+
+**Fix applied:** Build a port list scoped to the services expected in a Windows domain (`T:53,88,135,139,389,445,464,593,636,3268,3269,3389,5357,5985,5986`) and apply it through a cloned target — GVM locks the port list of any target that already has a report attached. On the rerun DC01 was identified as Windows and returned findings; the report's unfiltered port list grew from 2 entries to 11, and 7 CVEs were actually tested and closed against 0 in the first scan.
+
+**Lesson:** A vulnerability scanner is an instrument, and an instrument that has never been calibrated produces numbers, not measurements. Cross-check any new scanner against a second, independent tool on at least one host whose exposure is already known, before trusting anything it reports. The dangerous failure mode is not the scan that errors out — it is the scan that returns a clean report, because a clean report is what everyone wants to read.
+
+**Production difference:** A false negative in a vulnerability report is worse than no report: it manufactures documented, signed-off confidence in an exposure nobody has looked at. In audit terms, "0 findings" with no stated baseline and no stated scan configuration is not evidence of anything, and a scan whose coverage has never been verified should be reported as *not performed* rather than *passed*. The control that catches this is banal and rarely implemented — a known-vulnerable canary host inside every scan scope, whose findings must appear in the report for that report to be considered valid.
+
+**Evidence:** `screenshots/05_openvas/33_openvas_scan1_hosts.png`, `screenshots/05_openvas/45_nmap_dc01_13_ports.png`, `screenshots/05_openvas/40_openvas_scan2_hosts.png`
+
+---
+
+### A scan marked `Done` can contain tests that never ran
+
+The corrected scan returned three findings and, in a tab nobody opens by default, two error messages:
+
+```
+NVT timed out after 1800 seconds — Generic HTTP Directory Traversal / File Inclusion (Web Root) - Active Check — 10.10.10.10
+NVT timed out after 600 seconds  — GNU Bash Shellshock (CVE-2014-6271/6278) - Active Check                     — 10.10.10.10
+```
+
+Two active checks against DC01 expired without producing a verdict. The task still displays `Done` at 100%, and the finding list says nothing about them. Those 40 minutes of timeout also explain the scan's shape: DC01 alone consumed 54 of the 58 minutes, while WKS01 finished in 5.
+
+**Lesson:** "No finding" and "no result" are different statements that a scan report renders identically. For those two vectors the coverage is null, not negative, and the report cannot be read as evidence that DC01 is free of them. The `Error Messages` tab is the only place that distinction exists, and it is off the default path.
+
+**Production difference:** Scan coverage is itself a metric, and reporting findings without reporting coverage overstates assurance. A mature vulnerability-management process tracks tests attempted against tests completed, treats a rising timeout count as an operational alert, and states exclusions explicitly — the same way a penetration test report states what was out of scope. A finding list with no coverage statement is an opinion.
+
+**Evidence:** `screenshots/05_openvas/44_openvas_scan2_error_messages.png`
+
+---
+
+### An unauthenticated scan measures exposure, not patch level
+
+The valid scan returned 0 Critical, 0 High and 0 CVE against a Windows Server 2022 domain controller and a Windows 10 workstation. Neither machine has been patched since the lab was built.
+
+The two facts are not in contradiction. A black-box scan enumerates what answers on the network: open ports, service banners, protocol behaviour. It does not read the installed-updates list, the registry, or file versions — which is where almost every Windows CVE is actually visible. `0 CVE` means *nothing observable from the network without credentials*, and stretching it into *no vulnerabilities* is the entire distance between a scan and an assessment.
+
+This has a direct consequence on the P2 KPI, originally written as *"critical vulnerabilities on DC01 → 0 after remediation"*. With nothing above Medium in the baseline there is nothing to remediate, so the KPI cannot be met — and ticking it would present a scan blind spot as a security outcome. It has been rewritten in terms the evidence supports rather than claimed.
+
+**Fix applied:** None to the scan. The limitation is stated in §6 of the README, the KPI is restated, and a credentialed scan is listed as the next step rather than as an optional improvement.
+
+**Lesson:** The severity distribution of a scan says as much about the scan configuration as about the targets. An unauthenticated Windows scan returning only informational findings is behaving normally — the correct reaction is to question the method, not to celebrate the result.
+
+**Production difference:** Credentialed scanning is the default in mature vulnerability management, using a dedicated read-only service account with its own rotation and its own monitoring. Unauthenticated scanning keeps a place — it shows what an attacker without a foothold sees — but using it as the primary measure of patch compliance produces a report that trends green while the estate ages.
+
+---
+
+### Standing up the scanner was a project of its own
+
+`apt install openvas` takes a minute. Reaching a state where a scan could actually run took the rest of the session.
+
+`gvm-setup` failed twice before succeeding. PostgreSQL refused to work on databases whose collation version no longer matched the system's after a `full-upgrade` (fixed with `ALTER DATABASE ... REFRESH COLLATION VERSION`), and the `gvmd` database was missing entirely and had to be created by hand. The admin account then had to be created manually with `gvmd --create-user`, and the Feed Import Owner set by UUID before the interface behaved.
+
+The longest single blocker was the feed import: an `UPDATE` on `scap2.cpes` ran for roughly three hours across 1.8 million rows — a known GVM performance characteristic rather than a fault — during which the interface displayed *"Feed is currently syncing. Scans are not available"* and the Port Lists count sat at 0. It resolved when the transaction committed and the schema swapped from `scap2` to `scap`.
+
+One detail cost more time than it should have: a generated password containing `$$` was expanded by bash into the shell's PID, creating an account whose password was not the one on screen. Single quotes around the value fixed it.
+
+**Lesson:** Budget the deployment of a security tool separately from its use, and never plan a scan for the same session as the installation. And any secret passed on a command line goes in single quotes, always — `$`, `!` and backticks are live characters in a shell, and the failure is silent because the command itself succeeds with the wrong value.
+
+**Production difference:** This is the argument for containerised or appliance-based deployment. The Greenbone Community Container ships a pre-synced feed and removes the database bootstrap entirely. In production the scanner is infrastructure with its own maintenance window, monitoring and feed-freshness alerting — a scanner whose feed is three weeks stale reports clean on three weeks of new CVEs.
+
+---
+
+### Received is not understood — an IDS alert filed as "unknown problem"
+
+With the pipeline wired, transport was proven link by link: Suricata writing its alerts to pfSense's syslog, pfSense forwarding them, and a `tcpdump` on the Wazuh host capturing them on arrival as `local1.notice` datagrams — the exact facility and priority configured on the sensor. Wazuh's archive held them too.
+
+The alert log held nothing.
+
+`wazuh-logtest` replays one line through the three stages of Wazuh's pipeline and shows which stage fails. With pfSense in its default BSD syslog format:
+
+- **Pre-decoding** read `suricata[23921]:` as the *hostname*. pfSense omits the hostname when it forwards in BSD format, so the program name was taken for the machine name, and no program name was left.
+- **Decoding**: no decoder matched.
+- **Rules**: one still fired — generic rule **1002**, *"Unknown problem somewhere in the system"*, level 2, almost certainly on the word *Bad* in the alert category `Potentially Bad Traffic`. Level 2 sits under the alert threshold, so the event was discarded.
+
+An IDS detection, received intact by the SIEM, misread, reclassified as an unknown system problem on a keyword, and dropped under a threshold. No error at any stage.
+
+Switching pfSense to RFC 5424 put the hostname back into the message, but Wazuh's pre-decoder does not parse that format either: nothing extracted, no decoder, no rule at all.
+
+**Fix applied:** keep RFC 5424 — well-formed, hostname included, fixed structure — and write a decoder for it: a prematch on the RFC 5424 header of Suricata's messages, then Wazuh's JSON decoder on the remainder. Three custom rules on top (`100200`–`100202`, README §7). Everything was validated in `wazuh-logtest` before the manager was restarted: a malformed rules file stops the manager, agents included.
+
+**Lesson:** A SIEM that stores an event has not necessarily understood it. Transport and parsing are separate claims, proven by separate tools — `tcpdump` for the first, the platform's own parser test for the second. Neither syslog format pfSense can emit is parsed by Wazuh's stock pre-decoder, so every further pfSense source forwarded this way will need its own decoder.
+
+**Production difference:** In a SOC, onboarding a log source ends with a parser test, not with "logs are arriving". A source that arrives unparsed is worse than a missing one: it inflates the source inventory, feeds the volume counters, and detects nothing. Parser coverage is a metric per source, and its regressions — a vendor changing a log format in an update — are a known cause of silent detection loss.
+
+**Evidence:** `screenshots/06_wazuh_integration/51_wazuh_tcpdump_local1_notice.png`, `53_wazuh_archives_suricata_alerts.png`, `55_wazuh_logtest_bsd_hostname_misparse.png`, `56_wazuh_logtest_rfc5424_no_decoder.png`, `58_wazuh_logtest_rule_100201.png`
+
+---
+
+### A setting is changed when the saved configuration says so — not when the symptom disappears
+
+To cut telemetry volume before connecting the SIEM, every protocol type was unchecked in the DMZ instance's EVE settings, the form was captured with all boxes empty, and the instance was restarted. The change was then declared effective on two observations: eight seconds of log during the engine restart showing no DNS events, and a `grep alert` returning only alerts.
+
+Neither could have shown anything else. No DNS event could appear while the engine was restarting, and a search for `alert` excludes DNS lines by construction.
+
+The next day, DNS events were still flowing into Wazuh, and the settings page showed every box checked. One save had gone through the day before — SYSLOG output, printable payload, no packet dump, all visible in the shape of the alerts — and the second never had. The screenshot had been taken between the clicks and a save that never happened.
+
+**Fix applied:** uncheck again, save, **reopen the page and confirm the state survived the reload**, restart the instance — then prove it on the wire (next entry). The exported pfSense configuration was read afterwards to confirm the persisted values for the DMZ instance: output `syslog`, payload `only-printable`, packet dump `off`, every per-protocol EVE flag off.
+
+**Lesson:** A screenshot of a form is not a configuration, and the disappearance of a symptom is not a verification — least of all when the window observed could not have contained the symptom. A change is proven by reading the persisted state back.
+
+**Production difference:** This is the gap configuration management closes. A change recorded in a ticket and "verified" by the absence of complaints is indistinguishable from a change never applied. Desired-state tooling and config-as-code — here, an exported `config.xml` — turn "I think it's set" into a diff.
+
+**Evidence:** `screenshots/06_wazuh_integration/62_suricata_dmz_eve_logged_unsaved.png`, `46_suricata_dmz_eve_final.png`
+
+---
+
+### Silence proves nothing without a positive control
+
+Two sources of volume had to go before the SIEM was usable. pfSense's *Everything* forwarding sent the firewall log along with Suricata's alerts — one `filterlog` line per blocked SYN, roughly a thousand for a default nmap run, burying the two or three alerts it produced. And Suricata's EVE protocol telemetry — DNS, Kerberos, SMB — from a segment where a domain controller answers constantly.
+
+Both were cut at the source. Proving it took more care than cutting it.
+
+For the firewall log, the timestamp of the last `filterlog` line received (17:16:06 UTC) was compared with scan alerts still arriving afterwards (17:23:38): alerts flowing, firewall log stopped — so *System Events* carries Suricata's `LOCAL1` facility, and *Everything* is off.
+
+For DNS, a last event at 17:29:05 still unchanged at 17:37:59 looked conclusive — but only if Kali had queried DNS during those nine minutes, which nothing guaranteed. A forced `nslookup` from Kali closed the gap: the query crossed `em2`, and the last DNS event stayed at 17:29:05.
+
+**Lesson:** Silence is evidence only if something should have been seen. The cheapest way to know is to cause the event deliberately — a positive control — and confirm it does not appear. It is the empty OpenVAS scan in reverse: there, a clean report hid a blind scanner; here, a quiet log could have hidden a quiet source.
+
+**Production difference:** SIEM ingestion has a cost — licence, storage, analyst attention — and the discipline is to log what will be acted on. Filtering at the source is the cheap end of that; proving the filter with injected test events belongs in the same change, not after it. The same method validates detection rules: a rule never fired on purpose is a rule never tested.
+
+**Evidence:** `screenshots/06_wazuh_integration/52_wazuh_archives_everything_noise.png`, `48_pfsense_remote_logging_final.png`
+
+---
+
+### Severity is a claim — level 3 means "authorized"
+
+The first working rule filed every Suricata alert at level 3, copied from the level of Wazuh's built-in Suricata rule. On Wazuh's scale, level 3 means *successful or authorized events* — valid logins, firewall accepts. A scan from the DMZ against the domain controller was being filed next to them.
+
+**Fix applied:** a child rule, `100202`, for signatures starting with `ET SCAN`: level 6 — *frequent IDS events* on the same scale — mapped to MITRE ATT&CK **T1046**. Wazuh resolved the tactic (*Discovery*) and technique (*Network Service Discovery*) from the ID alone, and the dashboard's MITRE panel, empty until then, populated. The prefix match proved itself immediately: an `Oracle SQL port 1521` scan signature never seen during development was classified correctly on first arrival.
+
+Non-scan alerts still fall to the parent rule at level 3. Mapping Suricata's own `alert.severity` to Wazuh levels would be the complete fix.
+
+**Lesson:** A severity level is a statement about meaning, and copying a default copies someone else's triage decision without its context. The README had claimed T1046 since the Suricata phase; until this rule, the SIEM did not know it.
+
+**Production difference:** Levels decide what pages someone, what enters an SLA, what gets suppressed. A scan detection filed as an authorized event is not bad data — it is an ignored alert. Severity mapping is a design decision reviewed per rule family, not an inherited default.
+
+**Evidence:** `screenshots/06_wazuh_integration/59_wazuh_dashboard_rule_100201.png`, `60_wazuh_dashboard_rule_100202_mitre.png`
+
+---
+
+### The SIEM logs its own administrator
+
+Diagnosing the integration required `logall`, which makes Wazuh archive everything it receives — including its own host's logs, and therefore `sudo`'s record of every command typed on it, arguments included.
+
+The first consequence was comic: a `grep` for `"event_type":"alert"` in the archive returned the previous `grep`, whose command line contained the pattern. The same trap waited in the alerts file, since `sudo` itself triggers Wazuh alerts. The workaround was a character class: `10020[1]` matches the text `100201` in an alert, but not the literal `10020[1]` that `sudo` records for the command.
+
+The second consequence was not comic. Wazuh's password tool takes the new password as a command-line argument. `sudo` logged it, and the SIEM archived it: the dashboard administrator's password sits in cleartext in the SIEM's own archive.
+
+**Fix applied:** none yet — rotating the password without exposing the new value, and purging the archive, are in Next Steps.
+
+**Lesson:** Command-line arguments are logged — by shell history, by `sudo`, by process accounting — and logs end up in the SIEM. Secrets never go in `argv`. And a SIEM that monitors its own host ingests its administrators' mistakes along with everyone else's.
+
+**Production difference:** A tool that takes secrets as arguments is a finding in itself; the alternatives are prompts, standard input, restricted files, or a secret manager. `sudo` log redaction exists for exactly this. A SIEM's access control deserves the scrutiny of the most sensitive data it holds — which, as here, can include its own credentials.
+
+**Evidence:** `screenshots/06_wazuh_integration/54_wazuh_logtest_sudo_self_match.png`
+
+---
+
+### Moving a VM between segments is a two-layer change
+
+Kali was moved back from the LAN (OpenVAS phase) to the DMZ by switching its VirtualBox adapter to `dmz-network`. The next scan reported `0 hosts up` in 1.84 seconds.
+
+The fast failure was first read as a scan too short to cross an IDS detection threshold. It was nothing of the kind. NetworkManager still had the LAN profile active: Kali held `10.10.10.50/24` on the DMZ wire, treated DC01 as on-link, and sent ARP requests on a segment where nobody answers. No packet ever reached pfSense.
+
+The Wazuh OVA showed the same class of fault from the other side: after a reboot, its interface came up with no IPv4 address at all. The `ifcfg-eth0` file was complete and correct — the deprecated `network-scripts` service simply does not apply it at boot, and `ifup eth0` has to be run by hand.
+
+**Fix applied:** `nmcli con up dmz-static` on Kali — the LAN and DMZ profiles now coexist and switch with one command. `ip addr` and `ip route` checked after every move, on every machine, before any test.
+
+**Lesson:** A VM's position on the network is defined at two layers — the virtual cable and the IP configuration — and changing one produces a machine that looks moved without being moved. A result that comes back unusually fast is worth reading as "nothing happened" before it is read as "something was blocked".
+
+**Production difference:** The equivalent is a server re-patched to a new VLAN with its old static addressing. IPAM, DHCP reservations and configuration management exist to make the two layers move together — and post-change connectivity checks exist because they often don't.
+
+---
+
 ## Positive Surprises
 
 ### Suricata was already installed and running
@@ -255,6 +452,10 @@ The console displayed a syslog message during the first WebGUI login: `Successfu
 ### The CRITICAL rule worked on the first test
 
 After all the complexity of the rule configuration (wrong orders, corrupted rules, anchor icon confusion), when the actual segmentation test ran — Kali in DMZ pinging DC01 — the CRITICAL rule fired immediately, one entry per second, with the correct source and destination. The firewall was doing exactly what it was designed to do. The gap between the configuration effort and the elegance of the result is worth noting.
+
+### `wazuh-logtest` made the pipeline visible
+
+For most of the integration, Wazuh behaved as a black box: events in, nothing out. `wazuh-logtest` replays a single line through pre-decoding, decoding and rule matching, shows the result of each stage, and reloads the rule files on every run — so a decoder or rule can be written and tested without restarting the manager or touching production. It turned "Wazuh ignores my alerts" into "pre-decoding reads the program name as the hostname", which is a problem with a fix.
 
 ---
 
@@ -272,20 +473,34 @@ Building on the honesty from P1: I am still in a learning phase. What follows is
 
 - **Detection coverage would be validated on a schedule, not assumed.** Atomic tests or purple-team exercises firing known-signature traffic and confirming the alert lands in the SIEM. Service health tells you the daemon is alive; only a fired alert tells you the detection path works end to end.
 
+- **Scanner output would be calibrated against an independent tool before any report is issued.** A host of known exposure inside every scan scope, whose findings must appear for the report to be accepted. A vulnerability report with no baseline is unfalsifiable, and a false negative in one is worse than no report at all.
+
+- **Vulnerability scans would be credentialed by default.** A dedicated read-only service account for the scanner, rotated and monitored like any other privileged identity. Unauthenticated scanning would remain as the complementary external view, never as the measure of patch compliance.
+
 - **pfSense updates would be tested in a staging environment first.** The inability to update 2.7.2 to 2.8.1 would be a blocker in production. A staging pfSense would receive the update first, connectivity and rule behavior would be validated, then production would follow.
 
 - **DNSSEC would be enabled in production with proper upstream support.** Disabling DNSSEC was the correct fix for this homelab (VirtualBox NAT cannot support it properly), but in production DNSSEC provides an important layer of protection against DNS spoofing. The upstream resolvers would need to be DNSSEC-aware (Cloudflare 1.1.1.1, Google 8.8.8.8, or an internal resolver with DNSSEC validation).
 
 - **Rule logging would be selective and forwarded to the SIEM.** Logging every blocked packet from every interface would generate too much noise. In production, logging would be tuned to capture high-value events (CRITICAL DMZ→LAN attempts, WAN→LAN probes) and forwarded to Wazuh via syslog, creating a unified detection layer across P1 and P2.
 
+- **Log sources would be onboarded with a parser test, not declared covered when data arrives.** Transport, parsing and rule matching are three separate claims; `wazuh-logtest` or its equivalent proves the last two before a source counts toward coverage.
+
+- **Security alerts would travel over an authenticated transport.** Plain UDP syslog is unauthenticated — the source address is trivially spoofed, so anyone on the segment could inject alerts — unencrypted, and lossy under load. Syslog over TLS, or an agent-based forwarder, anywhere beyond an isolated lab.
+
+- **Secrets would never be passed as command-line arguments.** Prompts, standard input or restricted files — otherwise `sudo` and the SIEM keep a copy.
+
+- **Appliances would be managed over SSH from day one.** The hypervisor console cost a full session to a keyboard-layout mismatch and the absence of a clipboard. SSH from a management host removes both, and pfSense's `Diagnostics → Command Prompt` covers the firewall from a browser.
+
 ---
 
 ## Next Steps
 
-- Integrate Suricata `eve.json` alerts into Wazuh for unified SIEM correlation
-- Deploy Greenbone Community Edition (OpenVAS) and run the DC01 vulnerability assessment
-- Remediate findings and rescan to zero critical vulnerabilities
-- Export pfSense config backup as baseline (`Diagnostics → Backup & Restore → XML`)
+- Forward the WAN inline IPS (and the LAN IDS) alerts to Wazuh through the same pipeline — the perimeter IPS currently blocks traffic the SIEM never sees
+- Map Suricata's `alert.severity` to Wazuh levels, so non-scan alerts stop defaulting to level 3
+- Rotate the Wazuh dashboard admin password without passing it on the command line, and purge the archive that recorded the current one
+- Fix the duplicated rule ID `100001` flagged by `wazuh-logtest` — probably inherited from P1, and one of the two rules is silently ignored
+- Make the Wazuh OVA network configuration persistent (NetworkManager instead of the deprecated `network-scripts`)
+- Credentialed OpenVAS scanning and remediation — carried over to a dedicated vulnerability-management project
 
 ---
 

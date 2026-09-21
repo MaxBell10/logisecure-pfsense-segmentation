@@ -7,7 +7,7 @@
 
 ## Objective
 
-Implement network segmentation for **LogiSecure SA** using pfSense CE as the perimeter firewall, enforcing zone isolation between the IT LAN, the DMZ, and the WAN. Deploy Suricata as an IDS/IPS and validate the infrastructure with OpenVAS vulnerability scanning.
+Implement network segmentation for **LogiSecure SA** using pfSense CE as the perimeter firewall, enforcing zone isolation between the IT LAN, the DMZ, and the WAN. Deploy Suricata as an IDS/IPS, forward its detections to the Wazuh SIEM built in P1, and validate the infrastructure with OpenVAS vulnerability scanning.
 
 Builds on [P1 — Active Directory & SIEM Foundation](https://github.com/MaxBell10/logisecure-active-directory) — pfSense is inserted as the default gateway for the existing DC01/WKS01/Wazuh infrastructure.
 
@@ -39,8 +39,8 @@ INTERNET / WAN (VirtualBox NAT)
 | logisecure-pfsense | FreeBSD (pfSense CE 2.7.2) | WAN: DHCP / LAN: 10.10.10.1 / DMZ: 10.10.20.1 | Firewall, Router, IDS/IPS |
 | LOGISECURE-DC01 | Windows Server 2022 | 10.10.10.10 | Domain Controller, DNS (→ pfSense) |
 | LOGISECURE-WKS01 | Windows 10 Pro | 10.10.10.20 | Domain-joined workstation |
-| LOGISECURE-WAZUH | Ubuntu (OVA) | 10.10.10.30 | Wazuh SIEM — receives Suricata alerts |
-| Kali Linux (test) | Kali Linux | 10.10.20.10 | Segmentation + detection test host in DMZ |
+| LOGISECURE-WAZUH | Amazon Linux 2023 (Wazuh OVA 4.14.5) | 10.10.10.30 | Wazuh SIEM (from P1) — receives Suricata DMZ alerts via syslog (§7) |
+| Kali Linux (test) | Kali Linux | 10.10.20.10 (DMZ) · 10.10.10.50 (LAN) | Segmentation + detection tests from the DMZ; OpenVAS scanner from the LAN (see §6) |
 
 ---
 
@@ -182,7 +182,7 @@ DNS resolution required a 5-step fix due to VirtualBox NAT constraints. Document
 
 ### 5. Suricata IDS/IPS
 
-> **Status: Detection validated** — three instances deployed across all interfaces, ET Open rulesets applied, `$HOME_NET` tuned for internal segment monitoring, cross-segment detection test passed. SIEM integration remains open.
+> **Status: Detection validated** — three instances deployed across all interfaces, ET Open rulesets applied, `$HOME_NET` tuned for internal segment monitoring, cross-segment detection test passed. DMZ sensor alerts forwarded to Wazuh — see §7.
 
 | Interface | Instance | Blocking mode | Role |
 |---|---|---|---|
@@ -232,13 +232,230 @@ The WAN instance keeps the default `Home Net` deliberately: it is a perimeter se
 
 ### 6. OpenVAS / Greenbone — Vulnerability Scanning
 
-> **Status: Planned** — Greenbone Community Edition to be deployed via Docker for DC01 vulnerability assessment.
+> **Status: Scanned and validated** — GVM 25.04 deployed on the Kali host; two scans run against DC01 and WKS01. The first returned a clean-looking report that an independent nmap baseline contradicted, and was discarded. The corrected scan is the one reported below.
 
-| KPI | Target | Status |
+**Scanner deployment.** GVM 25.04 installed from the Kali repositories (`apt install openvas`, then `gvm-setup`), console at `https://127.0.0.1:9392`. Bringing it to a usable state required three manual repairs — PostgreSQL collation mismatch, missing `gvmd` database, manual admin creation — plus a multi-hour SCAP feed import before any scan could start. Documented in [`lessons_learned.md`](./lessons_learned.md).
+
+**Scan position — a deliberate choice, not a workaround.**
+
+Kali sits in the DMZ for the segmentation and detection work (§3). For vulnerability scanning it was moved to the LAN (`10.10.10.50`), because a scan launched from the DMZ measures the firewall rather than the hosts: every SYN is dropped at `em2` under `CRITICAL - Block DMZ to LAN`, and the report would restate §3 with a different tool. A vulnerability assessment asks *what is wrong with these hosts*, not *can this attacker reach them* — two questions needing two vantage points. Scanning from a position of trust is also how the exercise is performed in practice.
+
+| Parameter | Value |
+|---|---|
+| Scanner | GVM 25.04 (Greenbone Community Edition) on Kali |
+| Scanner position | LAN — `10.10.10.50` (temporary repositioning from the DMZ) |
+| Targets | DC01 `10.10.10.10`, WKS01 `10.10.10.20` |
+| Scan config | Full and fast |
+| Alive test | Consider Hosts as Alive |
+| Credentials | **None** — unauthenticated, black-box |
+
+**Scan 1 — discarded (report `acf86b9a`, 08:23 UTC).**
+
+Port list: `All IANA assigned TCP`. After 30 minutes, DC01 — the domain controller, the most exposed asset in the lab — returned **zero open ports, zero findings, operating system unidentified**. WKS01 returned a single port and one Medium. `Error Messages (0 of 0)`: the scan reported no problem of any kind.
+
+That reads as a clean host. It is a blind scan. An `nmap -Pn 10.10.10.10` from the same Kali host, on the same segment, returned **13 open ports** and a full Active Directory service fingerprint in 8 seconds:
+
+```
+53/tcp   domain        389/tcp  ldap            3268/tcp globalcatLDAP
+88/tcp   kerberos-sec  445/tcp  microsoft-ds    3269/tcp globalcatLDAPssl
+135/tcp  msrpc         464/tcp  kpasswd5        5357/tcp wsdapi
+139/tcp  netbios-ssn   593/tcp  http-rpc-epmap  5985/tcp wsman
+                       636/tcp  ldapssl
+```
+
+**Cause.** `All IANA assigned TCP` covers several thousand ports. Windows hosts drop unsolicited SYNs silently instead of returning RST — nmap reports `987 filtered tcp ports (no-response)` for exactly that reason — so every closed port costs the scanner a full timeout rather than an immediate answer. DC01 spent 25 minutes exhausting timeouts and never reached the ports that were open.
+
+**Fix.** A port list scoped to the services expected in a Windows domain, applied through a cloned target (GVM locks the port list of a target that already has a report):
+
+| Object | Value |
+|---|---|
+| Port list `LogiSecure-Windows-Ports` | `T:53,88,135,139,389,445,464,593,636,3268,3269,3389,5357,5985,5986` |
+| Target `LogiSecure-LAN-Targets-WinPorts` | Same two hosts, new port list |
+| Task `LogiSecure-P2-LAN-Scan-WinPorts` | Full and fast |
+
+**Scan 2 — retained (report `b78d205e`, 12:38 UTC).**
+
+| | Scan 1 — `acf86b9a` | Scan 2 — `b78d205e` |
 |---|---|---|
-| Critical vulnerabilities on DC01 (before) | Documented | 📋 Pending |
-| Critical vulnerabilities on DC01 (after) | **0** | 📋 Pending |
-| Scan report before/after | Produced | 📋 Pending |
+| Port list | All IANA assigned TCP | LogiSecure-Windows-Ports (15 ports) |
+| DC01 — OS detection | Unidentified | Windows ✅ |
+| DC01 — findings | 0 | 2 |
+| Port entries (unfiltered) | 2 | 11 |
+| CVEs tested and closed | 0 | 7 |
+| Error messages | 0 | 2 (NVT timeouts) |
+| Duration | 0:30 h | 0:58 h |
+
+Findings, filtered at `min_qod=70`:
+
+| Finding | Severity | QoD | Host | Port |
+|---|---|---|---|---|
+| DCE/RPC and MSRPC Services Enumeration Reporting | 5.0 Medium | 80% | DC01 `10.10.10.10` | 135/tcp |
+| DCE/RPC and MSRPC Services Enumeration Reporting | 5.0 Medium | 80% | WKS01 `10.10.10.20` | 135/tcp |
+| TCP Timestamps Information Disclosure | 2.6 Low | 80% | DC01 `10.10.10.10` | general/tcp |
+
+**0 Critical · 0 High · 0 CVE.** That figure describes an unauthenticated scan, not the security posture of the hosts — see the limitations below.
+
+**Residual limitations, stated rather than omitted.**
+
+*Two tests never completed.* The retained report's `Error Messages` tab lists two NVTs that expired on DC01 — `Generic HTTP Directory Traversal / File Inclusion (Web Root) - Active Check` after 1800 s, and `GNU Bash Shellshock (CVE-2014-6271/6278) - Active Check` after 600 s. Those 40 minutes of timeout are also why DC01 alone accounts for 54 of the scan's 58 minutes. Coverage on those two vectors is **null, not negative**: the report is not evidence that DC01 is free of them.
+
+*The scan is unauthenticated.* A black-box scan enumerates what answers on the network. It does not read the patch level, the registry, or the installed-updates list — which is where almost every Windows CVE is visible. `0 CVE` means *nothing observable from the network without credentials*, and nothing more. A credentialed scan with a dedicated read-only SMB account is what would produce genuinely remediable findings — carried over to a dedicated vulnerability-management project (see Status).
+
+![Scan 1 — DC01 with zero ports detected](screenshots/05_openvas/33_openvas_scan1_hosts.png)
+
+![nmap baseline — 13 open ports on DC01](screenshots/05_openvas/45_nmap_dc01_13_ports.png)
+
+![Scan 2 — DC01 identified, findings returned](screenshots/05_openvas/40_openvas_scan2_hosts.png)
+
+![Scan 2 — findings](screenshots/05_openvas/42_openvas_scan2_results.png)
+
+![Scan 2 — NVT timeouts](screenshots/05_openvas/44_openvas_scan2_error_messages.png)
+
+| KPI | Target | Actual | Status |
+|---|---|---|---|
+| Scan executed from a position of trust | DC01 + WKS01 | 2 hosts, Full and fast | ✅ |
+| Scanner output validated against an independent baseline | Yes | nmap cross-check — scan 1 invalidated and redone | ✅ |
+| Critical / High findings (unauthenticated) | Documented | 0 Critical · 0 High · 2 Medium · 1 Low | ✅ |
+| Authenticated scan — patch-level assessment | Performed | Carried over — out of P2 scope | ➡️ |
+| Remediation + rescan to 0 Critical | 0 | Nothing above Medium to remediate — see limitations | ⚠️ |
+
+---
+
+### 7. Suricata → Wazuh — SIEM Integration
+
+> **Status: Operational** — DMZ sensor alerts reach the P1 Wazuh SIEM as structured alerts, classified by severity and mapped to MITRE ATT&CK. Only alerts leave the sensor: firewall logs and protocol telemetry are filtered at the source.
+
+**Pipeline — four links, and a fault at any of them is silent:** nothing errors, the alert simply never appears.
+
+```
+Suricata DMZ instance (em2)
+   │  EVE JSON — alerts (and drops) only
+   ▼
+syslog LOCAL1.NOTICE  →  pfSense syslogd
+   │  RFC 5424 · "System Events" only · UDP 514
+   ▼
+Wazuh remoted  10.10.10.30  (allowed-ips 10.10.10.1)
+   │
+   ▼
+decoder pfsense-suricata  →  rules 100200 / 100201 / 100202  →  dashboard
+```
+
+| Link | Setting | Value |
+|---|---|---|
+| Suricata DMZ instance | EVE output type | `SYSLOG` — facility `LOCAL1`, priority `NOTICE` |
+| | Alert payload | `PRINTABLE` only, packet dump off — keeps each alert within a syslog datagram |
+| | EVE logged traffic / info | **None** — alerts and drops only |
+| pfSense syslog | Log message format | syslog (RFC 5424) |
+| | Remote server | `10.10.10.30:514` |
+| | Remote syslog contents | **System Events** only |
+| Wazuh manager | Remote block | `syslog` · UDP 514 · `allowed-ips 10.10.10.1` |
+| | Decoder | `pfsense-suricata` (custom) |
+| | Rules | `100200`–`100202` (custom) |
+
+![Suricata DMZ — EVE output, final state](screenshots/06_wazuh_integration/46_suricata_dmz_eve_final.png)
+
+![pfSense remote logging — System Events only](screenshots/06_wazuh_integration/48_pfsense_remote_logging_final.png)
+
+**Wazuh reception** — a second `<remote>` block, alongside the untouched agent channel (1514/tcp):
+
+```xml
+<remote>
+  <connection>syslog</connection>
+  <port>514</port>
+  <protocol>udp</protocol>
+  <allowed-ips>10.10.10.1</allowed-ips>
+</remote>
+```
+
+**Transport proven before decoding.** A capture on the Wazuh host during a scan shows the alerts arriving from pfSense as `local1.notice` datagrams — the exact facility and priority configured on the sensor:
+
+![tcpdump — local1.notice datagrams from pfSense](screenshots/06_wazuh_integration/51_wazuh_tcpdump_local1_notice.png)
+
+**Received is not understood.** The alerts were in Wazuh's archive, yet no Wazuh alert was generated. `wazuh-logtest` showed why, format by format:
+
+| pfSense format | Wazuh pre-decoding | Decoder | Outcome |
+|---|---|---|---|
+| BSD (RFC 3164, default) | Hostname absent from forwarded messages → `suricata[23921]:` read as the hostname, no program name left | None | Generic rule **1002** *"Unknown problem somewhere in the system"*, level 2 — matched on the word *Bad* in `Potentially Bad Traffic`, then discarded under the alert threshold |
+| RFC 5424 | Header not recognised at all | None | No rule |
+| RFC 5424 + custom decoder | Header matched by the decoder's prematch | `pfsense-suricata` → JSON fields | Rules **100201** / **100202** — alert generated |
+
+![logtest — BSD format misparsed, rule 1002](screenshots/06_wazuh_integration/55_wazuh_logtest_bsd_hostname_misparse.png)
+
+Neither syslog format pfSense can emit is parsed by Wazuh's stock pre-decoder. Any further pfSense source forwarded this way will need its own decoder.
+
+**Custom decoder** — matches the RFC 5424 header of Suricata's messages, then hands the remainder to Wazuh's JSON decoder:
+
+```xml
+<decoder name="pfsense-suricata">
+  <prematch>^1 \S+ \S+ suricata \d+ - - </prematch>
+  <plugin_decoder offset="after_prematch">JSON_Decoder</plugin_decoder>
+</decoder>
+```
+
+**Custom rules:**
+
+```xml
+<group name="ids,suricata,pfsense,">
+  <rule id="100200" level="0">
+    <decoded_as>pfsense-suricata</decoded_as>
+    <description>pfSense Suricata EVE event</description>
+  </rule>
+
+  <rule id="100201" level="3">
+    <if_sid>100200</if_sid>
+    <field name="event_type">^alert$</field>
+    <description>Suricata alert (pfSense): $(alert.signature)</description>
+  </rule>
+</group>
+
+<group name="ids,suricata,pfsense,">
+  <rule id="100202" level="6">
+    <if_sid>100201</if_sid>
+    <field name="alert.signature">^ET SCAN</field>
+    <description>Suricata (pfSense): network scan detected - $(alert.signature)</description>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+  </rule>
+</group>
+```
+
+Rule `100202` exists because the first version filed every alert at level 3 — which on Wazuh's scale means *successful or authorized events*. Scan signatures are raised to level 6 (*frequent IDS events*) and mapped to **T1046 — Network Service Discovery**; Wazuh resolves the tactic and technique names from the ID alone. The prefix match covers the whole `ET SCAN` family: an `Oracle SQL port 1521` scan signature never seen during development was classified correctly on first arrival.
+
+![logtest — decoder and rule matched](screenshots/06_wazuh_integration/58_wazuh_logtest_rule_100201.png)
+
+![Wazuh dashboard — rule 100202, MITRE T1046](screenshots/06_wazuh_integration/60_wazuh_dashboard_rule_100202_mitre.png)
+
+**Noise filtered at the source — proven, not assumed.**
+
+| Source of volume | Fix | Proof |
+|---|---|---|
+| pfSense *Everything* forwarding — one `filterlog` line per blocked SYN, roughly a thousand per default nmap run | Remote contents → System Events only | Last `filterlog` line received 17:16:06 UTC; scan alerts still arriving at 17:23:38 |
+| Suricata EVE protocol telemetry — DNS, Kerberos, SMB… on a segment where a domain controller answers constantly | All EVE logged traffic / info unchecked | Last DNS event 17:29:05 UTC — unchanged nine minutes later, and unchanged after a DNS query forced from Kali |
+
+The second fix had already been "applied" the day before: the checkboxes were cleared on screen but never saved. See [`lessons_learned.md`](./lessons_learned.md).
+
+**Notes for an analyst reading these alerts.**
+
+- **Agent = `wazuh-server`.** Syslog sources are not agents: every pfSense alert is attributed to the manager itself. Filter on `rule.groups:pfsense`, not on agent name.
+- **`"action": "allowed"`** is Suricata's own verdict as a passive IDS, not the firewall's. pf dropped the same packets — the `filterlog` entries prove it. Prevention and detection are separate claims (§3).
+- **Two clocks.** Wazuh stamps in UTC, pfSense in local time (UTC+2 here). Both are correct; correlating across sources means normalising first.
+
+![Top agents — pfSense alerts attributed to wazuh-server](screenshots/06_wazuh_integration/61_wazuh_dashboard_agent_attribution.png)
+
+**Known limitations.**
+
+- Only the **DMZ** sensor is forwarded. The WAN inline IPS and the LAN IDS still write to local files — the perimeter IPS blocks traffic the SIEM never sees.
+- Non-scan Suricata alerts keep level 3 through rule `100201`. A mapping from Suricata's `alert.severity` to Wazuh levels is not implemented.
+- Transport is plain UDP syslog: unauthenticated (the `allowed-ips` source address is trivially spoofed over UDP), unencrypted, and lossy under load. Acceptable on an isolated lab segment, not beyond it.
+
+| KPI | Target | Actual | Status |
+|---|---|---|---|
+| Suricata alerts received by the SIEM | Yes | `local1.notice` datagrams captured on Wazuh | ✅ |
+| Alerts decoded and raised as Wazuh alerts | Yes | Rules 100201 / 100202 — visible in the dashboard | ✅ |
+| Scan detections mapped to MITRE ATT&CK | T1046 | **Network Service Discovery** in the dashboard | ✅ |
+| Only alerts forwarded | No firewall / protocol telemetry | Verified — timestamps + positive control | ✅ |
+| WAN / LAN sensors forwarded | — | Not implemented | 📋 |
 
 ---
 
@@ -246,6 +463,7 @@ The WAN instance keeps the default `Home Net` deliberately: it is a perimeter se
 
 ![pfSense](https://img.shields.io/badge/pfSense-CE_2.7.2-1F3864?style=flat&logo=pfsense&logoColor=white)
 ![Suricata](https://img.shields.io/badge/Suricata-IDS%2FIPS-E05252?style=flat&logoColor=white)
+![Wazuh](https://img.shields.io/badge/Wazuh-4.14.5-3595F9?style=flat&logoColor=white)
 ![Kali Linux](https://img.shields.io/badge/Kali_Linux-557C94?style=flat&logo=kalilinux&logoColor=white)
 ![VirtualBox](https://img.shields.io/badge/VirtualBox_7.x-183A61?style=flat&logo=virtualbox&logoColor=white)
 ![Windows Server](https://img.shields.io/badge/Windows_Server_2022-0078D4?style=flat&logo=windows&logoColor=white)
@@ -256,7 +474,9 @@ The WAN instance keeps the default `Home Net` deliberately: it is a perimeter se
 | Suricata | (pfSense package) | IDS/IPS — 3 instances, ET Open rulesets |
 | VirtualBox | 7.x | Hypervisor — internal networks |
 | Kali Linux | Rolling | Segmentation + detection test host (DMZ) |
-| Greenbone / OpenVAS | Community Edition | Vulnerability scanner |
+| Greenbone / OpenVAS | GVM 25.04 (Kali package) | Vulnerability scanner — unauthenticated LAN scans |
+| nmap | 7.99 | Independent baseline used to validate the scanner |
+| Wazuh | 4.14.5 (OVA, from P1) | SIEM — Suricata DMZ alerts via syslog, custom decoder and rules |
 | dnsmasq | (pfSense built-in) | DNS Forwarder → 10.0.2.3 |
 
 ---
@@ -275,7 +495,8 @@ logisecure-pfsense-segmentation/
     ├── 02_firewall_rules/       # Aliases, LAN/DMZ/WAN rules
     ├── 03_segmentation_tests/   # Kali DMZ config, blocked logs, internet test
     ├── 04_suricata/             # Suricata config, HOME_NET fix, detection test
-    └── 05_openvas/              # Greenbone scan reports before/after
+    ├── 05_openvas/              # GVM scans 1 & 2, nmap baseline, NVT timeouts
+    └── 06_wazuh_integration/    # Suricata → syslog → Wazuh pipeline, decoder, rules, dashboard
 ```
 
 ---
@@ -290,8 +511,12 @@ logisecure-pfsense-segmentation/
 | Critical logging on blocked flows | Yes | **7 logged rules** | ✅ |
 | Suricata alerts detected | ≥ 1 test | **ET SCAN / T1046 validated** | ✅ |
 | Sensor `$HOME_NET` scoped for east-west detection | Both internal sensors | **LAN + DMZ instances** | ✅ |
-| Suricata → Wazuh integration | Operational | `TBD` | 📋 |
-| OpenVAS critical vulns after remediation | 0 | `TBD` | 📋 |
+| Suricata → Wazuh integration | Operational | **DMZ sensor · rules 100201 / 100202 · T1046 mapped** | ✅ |
+| Only alerts forwarded to the SIEM | No firewall / protocol telemetry | **Verified — timestamps + positive control** | ✅ |
+| OpenVAS scan executed + validated against a baseline | Yes | **2 hosts · nmap cross-check** | ✅ |
+| OpenVAS Critical / High findings (unauthenticated) | Documented | **0 Critical · 0 High · 2 Medium · 1 Low** | ✅ |
+| OpenVAS authenticated scan (patch level) | Performed | `Carried over — out of P2 scope` | ➡️ |
+| OpenVAS critical vulns after remediation | 0 | `Nothing above Medium to remediate — see §6` | ⚠️ |
 
 ---
 
@@ -312,6 +537,11 @@ logisecure-pfsense-segmentation/
 | 11 | Suricata — interface config + rulesets | ✅ Done |
 | 12 | Suricata — `$HOME_NET` scoping + cross-segment detection test | ✅ Done |
 | 13 | Suricata — `$HOME_NET` scoping on LAN instance | ✅ Done |
-| 14 | Suricata → Wazuh integration (eve.json) | 📋 Planned |
-| 15 | OpenVAS — deployment + DC01 scan | 📋 Planned |
-| 16 | OpenVAS — remediation + rescan (0 critical) | 📋 Planned |
+| 14 | Suricata → Wazuh integration — DMZ sensor, syslog, custom decoder + rules | ✅ Done |
+| 15 | OpenVAS — GVM 25.04 deployment + LAN scan (DC01, WKS01) | ✅ Done |
+| 16 | OpenVAS — scan invalidated by nmap baseline, port list corrected, rescan | ✅ Done |
+| 17 | OpenVAS — authenticated scan (read-only SMB account) for patch-level findings | ➡️ Carried over |
+| 18 | Remediation + rescan | ➡️ Carried over |
+| 19 | pfSense configuration baseline exported — kept out of the repository (contains secrets) | ✅ Done |
+
+> Steps 17–18 were deliberately moved out of P2. P2 covers segmentation and detection; credentialed scanning and a full remediation cycle belong to a dedicated vulnerability-management project later in the programme. The unauthenticated scan and its limits are documented in §6.
