@@ -457,6 +457,8 @@ After all the complexity of the rule configuration (wrong orders, corrupted rule
 
 For most of the integration, Wazuh behaved as a black box: events in, nothing out. `wazuh-logtest` replays a single line through pre-decoding, decoding and rule matching, shows the result of each stage, and reloads the rule files on every run — so a decoder or rule can be written and tested without restarting the manager or touching production. It turned "Wazuh ignores my alerts" into "pre-decoding reads the program name as the hostname", which is a problem with a fix.
 
+It paid off beyond P2. The warning `Rule ID '100001' is duplicated` in its output led back to P1's brute-force rule, silently inactive since its deployment — shadowed by an example rule Wazuh ships with the same ID. Found, fixed and proven before/after; the full account is in the [`logisecure-active-directory` lessons learned](https://github.com/MaxBell10/logisecure-active-directory/blob/main/lessons_learned.md).
+
 ---
 
 ## What I Would Do Differently in Production
@@ -498,7 +500,6 @@ Building on the honesty from P1: I am still in a learning phase. What follows is
 - Forward the WAN inline IPS (and the LAN IDS) alerts to Wazuh through the same pipeline — the perimeter IPS currently blocks traffic the SIEM never sees
 - Map Suricata's `alert.severity` to Wazuh levels, so non-scan alerts stop defaulting to level 3
 - Rotate the Wazuh dashboard admin password without passing it on the command line, and purge the archive that recorded the current one
-- Fix the duplicated rule ID `100001` flagged by `wazuh-logtest` — probably inherited from P1, and one of the two rules is silently ignored
 - Make the Wazuh OVA network configuration persistent (NetworkManager instead of the deprecated `network-scripts`)
 - Credentialed OpenVAS scanning and remediation — carried over to a dedicated vulnerability-management project
 
