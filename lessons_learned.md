@@ -115,7 +115,7 @@ The reason is architectural, not a misconfiguration. Both hosts are in `10.10.10
 
 **Production difference:** In production, this blind spot is a documented architectural decision rather than an oversight. East-west visibility has to be bought explicitly: mirror ports into the IDS, inline microsegmentation, or EDR/HIDS coverage on every host. An architecture document that states "IDS deployed" without specifying where the sensor sits and what it can actually observe is not an architecture document.
 
-**Evidence:** `screenshots/04_suricata/25_kali_nmap_dc01.png`
+**Evidence:** [`25_kali_nmap_dc01.png`](screenshots/04_suricata/25_kali_nmap_dc01.png)
 
 ---
 
@@ -151,7 +151,7 @@ Two preconditions were broken, neither of them checked.
 
 **The configuration was never persistent.** The address was applied with `ip addr add`, which writes to the running kernel only and sits entirely outside NetworkManager — the service actually managing `eth0` on Kali. NetworkManager held a DHCP profile for that interface, on a segment with no DHCP server, and reclaimed the interface repeatedly. The address disappeared between test cycles; at least two scans were launched from an interface holding no IPv4 address at all. A "network disconnected" notification appeared on the Kali desktop mid-session and was dismissed as noise.
 
-Meanwhile the repository already held the counter-evidence. Screenshot 16 (`screenshots/03_segmentation_tests/16_log_dmz_lan_blocked.png`) shows Kali operating at `10.10.20.10` with traffic crossing pfSense and hitting the block rule.
+Meanwhile the repository already held the counter-evidence. Screenshot 16 ([`16_log_dmz_lan_blocked.png`](screenshots/03_segmentation_tests/16_log_dmz_lan_blocked.png)) shows Kali operating at `10.10.20.10` with traffic crossing pfSense and hitting the block rule.
 
 **Fix applied:** Configure the address *through* NetworkManager rather than around it, using the documented address:
 
@@ -169,7 +169,7 @@ It still produced zero alerts. The invalid test had been masking a second, unrel
 
 **Production difference:** Blaming the platform is the most expensive wrong answer available. A finding that reads "control cannot be tested due to environment limitation" closes an investigation, reallocates budget, and sometimes drives a migration. The bar for that claim is the same as for any other finding: reproducible, and reconciled against every piece of evidence already on file. Ephemeral configuration applied by hand is also exactly what configuration management exists to eliminate — Ansible, Puppet or equivalent enforce desired state and make drift visible, where a change that silently disappears at the next reboot is an incident waiting for a maintenance window.
 
-**Evidence:** `screenshots/04_suricata/26_kali_dmz_static_ip_nmcli.png`, `screenshots/04_suricata/27_pfsense_tcpdump_em2_syn_captured.png`
+**Evidence:** [`26_kali_dmz_static_ip_nmcli.png`](screenshots/04_suricata/26_kali_dmz_static_ip_nmcli.png), [`27_pfsense_tcpdump_em2_syn_captured.png`](screenshots/04_suricata/27_pfsense_tcpdump_em2_syn_captured.png)
 
 ---
 
@@ -216,7 +216,7 @@ The WAN instance keeps the default deliberately: it is a perimeter sensor, and "
 
 **Outcome:** KPI *"≥ 1 validated Suricata alert"* is **met**.
 
-**Evidence:** `screenshots/04_suricata/28_suricata_dmz_no_alert_before_fix.png` (before), `screenshots/04_suricata/29_suricata_dmz_alert_query.png` and `screenshots/04_suricata/30_suricata_dmz_alert_matched.png` (after)
+**Evidence:** [`28_suricata_dmz_no_alert_before_fix.png`](screenshots/04_suricata/28_suricata_dmz_no_alert_before_fix.png) (before), [`29_suricata_dmz_alert_query.png`](screenshots/04_suricata/29_suricata_dmz_alert_query.png) and [`30_suricata_dmz_alert_matched.png`](screenshots/04_suricata/30_suricata_dmz_alert_matched.png) (after)
 
 **Lesson:** The pfSense default is built for a perimeter sensor — outside attacking inside. Applied unchanged to an internal segment, it declares the attacker's own subnet trusted and disables the entire scan-detection ruleset for exactly the traffic the sensor was deployed to watch. The default is not wrong; it is right for one position and silently wrong for every other. Every surface indicator stayed green throughout: instance running, correct interface, `emerging-scan.rules` enabled, packets arriving, flows logged. None of them can reveal this. Only firing real attack traffic and demanding an alert does.
 
@@ -236,7 +236,7 @@ The two layers were also proven on different artefacts: a firewall log entry for
 
 **Production difference:** This is the difference between a blocked event nobody sees and a blocked event that generates a ticket. Firewall drop logs are volume; IDS alerts are signal. A report that conflates the two overstates coverage.
 
-**Evidence:** `screenshots/04_suricata/30_suricata_dmz_alert_matched.png`, `screenshots/04_suricata/31_pfsense_firewall_block_dmz_lan.png`
+**Evidence:** [`30_suricata_dmz_alert_matched.png`](screenshots/04_suricata/30_suricata_dmz_alert_matched.png), [`31_pfsense_firewall_block_dmz_lan.png`](screenshots/04_suricata/31_pfsense_firewall_block_dmz_lan.png)
 
 ---
 
@@ -260,7 +260,7 @@ The first OpenVAS scan finished cleanly: status `Done`, two hosts scanned, no er
 
 That is a publishable-looking result, and it was false.
 
-The contradicting evidence was already in this repository. The nmap capture from the Suricata phase (`25_kali_nmap_dc01.png`) documents the same Kali host, on the same segment, finding 13 open ports and a full AD service fingerprint. Re-running `nmap -Pn 10.10.10.10` to settle it took 8 seconds and returned the same 13 ports.
+The contradicting evidence was already in this repository. The nmap capture from the Suricata phase ([`25_kali_nmap_dc01.png`](screenshots/04_suricata/25_kali_nmap_dc01.png)) documents the same Kali host, on the same segment, finding 13 open ports and a full AD service fingerprint. Re-running `nmap -Pn 10.10.10.10` to settle it took 8 seconds and returned the same 13 ports.
 
 **Cause.** The target used the `All IANA assigned TCP` port list — several thousand ports. Windows hosts drop unsolicited SYNs silently instead of returning RST (nmap reports `987 filtered tcp ports (no-response)` for exactly that reason), so every closed port costs the scanner a full timeout rather than an immediate answer. DC01 spent 25 minutes exhausting timeouts and never reached the ports that were open. Nothing in the interface signals this: the task reports `Done`, and `Error Messages` reports `0 of 0`.
 
@@ -270,7 +270,7 @@ The contradicting evidence was already in this repository. The nmap capture from
 
 **Production difference:** A false negative in a vulnerability report is worse than no report: it manufactures documented, signed-off confidence in an exposure nobody has looked at. In audit terms, "0 findings" with no stated baseline and no stated scan configuration is not evidence of anything, and a scan whose coverage has never been verified should be reported as *not performed* rather than *passed*. The control that catches this is banal and rarely implemented — a known-vulnerable canary host inside every scan scope, whose findings must appear in the report for that report to be considered valid.
 
-**Evidence:** `screenshots/05_openvas/33_openvas_scan1_hosts.png`, `screenshots/05_openvas/45_nmap_dc01_13_ports.png`, `screenshots/05_openvas/40_openvas_scan2_hosts.png`
+**Evidence:** [`33_openvas_scan1_hosts.png`](screenshots/05_openvas/33_openvas_scan1_hosts.png), [`45_nmap_dc01_13_ports.png`](screenshots/05_openvas/45_nmap_dc01_13_ports.png), [`40_openvas_scan2_hosts.png`](screenshots/05_openvas/40_openvas_scan2_hosts.png)
 
 ---
 
@@ -289,7 +289,7 @@ Two active checks against DC01 expired without producing a verdict. The task sti
 
 **Production difference:** Scan coverage is itself a metric, and reporting findings without reporting coverage overstates assurance. A mature vulnerability-management process tracks tests attempted against tests completed, treats a rising timeout count as an operational alert, and states exclusions explicitly — the same way a penetration test report states what was out of scope. A finding list with no coverage statement is an opinion.
 
-**Evidence:** `screenshots/05_openvas/44_openvas_scan2_error_messages.png`
+**Evidence:** [`44_openvas_scan2_error_messages.png`](screenshots/05_openvas/44_openvas_scan2_error_messages.png)
 
 ---
 
@@ -347,7 +347,7 @@ Switching pfSense to RFC 5424 put the hostname back into the message, but Wazuh'
 
 **Production difference:** In a SOC, onboarding a log source ends with a parser test, not with "logs are arriving". A source that arrives unparsed is worse than a missing one: it inflates the source inventory, feeds the volume counters, and detects nothing. Parser coverage is a metric per source, and its regressions — a vendor changing a log format in an update — are a known cause of silent detection loss.
 
-**Evidence:** `screenshots/06_wazuh_integration/51_wazuh_tcpdump_local1_notice.png`, `53_wazuh_archives_suricata_alerts.png`, `55_wazuh_logtest_bsd_hostname_misparse.png`, `56_wazuh_logtest_rfc5424_no_decoder.png`, `58_wazuh_logtest_rule_100201.png`
+**Evidence:** [`51_wazuh_tcpdump_local1_notice.png`](screenshots/06_wazuh_integration/51_wazuh_tcpdump_local1_notice.png), [`53_wazuh_archives_suricata_alerts.png`](screenshots/06_wazuh_integration/53_wazuh_archives_suricata_alerts.png), [`55_wazuh_logtest_bsd_hostname_misparse.png`](screenshots/06_wazuh_integration/55_wazuh_logtest_bsd_hostname_misparse.png), [`56_wazuh_logtest_rfc5424_no_decoder.png`](screenshots/06_wazuh_integration/56_wazuh_logtest_rfc5424_no_decoder.png), [`58_wazuh_logtest_rule_100201.png`](screenshots/06_wazuh_integration/58_wazuh_logtest_rule_100201.png)
 
 ---
 
@@ -365,7 +365,7 @@ The next day, DNS events were still flowing into Wazuh, and the settings page sh
 
 **Production difference:** This is the gap configuration management closes. A change recorded in a ticket and "verified" by the absence of complaints is indistinguishable from a change never applied. Desired-state tooling and config-as-code — here, an exported `config.xml` — turn "I think it's set" into a diff.
 
-**Evidence:** `screenshots/06_wazuh_integration/62_suricata_dmz_eve_logged_unsaved.png`, `46_suricata_dmz_eve_final.png`
+**Evidence:** [`62_suricata_dmz_eve_logged_unsaved.png`](screenshots/06_wazuh_integration/62_suricata_dmz_eve_logged_unsaved.png), [`46_suricata_dmz_eve_final.png`](screenshots/06_wazuh_integration/46_suricata_dmz_eve_final.png)
 
 ---
 
@@ -383,7 +383,7 @@ For DNS, a last event at 17:29:05 still unchanged at 17:37:59 looked conclusive 
 
 **Production difference:** SIEM ingestion has a cost — licence, storage, analyst attention — and the discipline is to log what will be acted on. Filtering at the source is the cheap end of that; proving the filter with injected test events belongs in the same change, not after it. The same method validates detection rules: a rule never fired on purpose is a rule never tested.
 
-**Evidence:** `screenshots/06_wazuh_integration/52_wazuh_archives_everything_noise.png`, `48_pfsense_remote_logging_final.png`
+**Evidence:** [`52_wazuh_archives_everything_noise.png`](screenshots/06_wazuh_integration/52_wazuh_archives_everything_noise.png), [`48_pfsense_remote_logging_final.png`](screenshots/06_wazuh_integration/48_pfsense_remote_logging_final.png)
 
 ---
 
@@ -399,7 +399,7 @@ Non-scan alerts still fall to the parent rule at level 3. Mapping Suricata's own
 
 **Production difference:** Levels decide what pages someone, what enters an SLA, what gets suppressed. A scan detection filed as an authorized event is not bad data — it is an ignored alert. Severity mapping is a design decision reviewed per rule family, not an inherited default.
 
-**Evidence:** `screenshots/06_wazuh_integration/59_wazuh_dashboard_rule_100201.png`, `60_wazuh_dashboard_rule_100202_mitre.png`
+**Evidence:** [`59_wazuh_dashboard_rule_100201.png`](screenshots/06_wazuh_integration/59_wazuh_dashboard_rule_100201.png), [`60_wazuh_dashboard_rule_100202_mitre.png`](screenshots/06_wazuh_integration/60_wazuh_dashboard_rule_100202_mitre.png)
 
 ---
 
@@ -417,7 +417,7 @@ The second consequence was not comic. Wazuh's password tool takes the new passwo
 
 **Production difference:** A tool that takes secrets as arguments is a finding in itself; the alternatives are prompts, standard input, restricted files, or a secret manager. `sudo` log redaction exists for exactly this. A SIEM's access control deserves the scrutiny of the most sensitive data it holds — which, as here, can include its own credentials.
 
-**Evidence:** `screenshots/06_wazuh_integration/54_wazuh_logtest_sudo_self_match.png`
+**Evidence:** [`54_wazuh_logtest_sudo_self_match.png`](screenshots/06_wazuh_integration/54_wazuh_logtest_sudo_self_match.png)
 
 ---
 
